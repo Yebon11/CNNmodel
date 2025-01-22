@@ -1,2 +1,341 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+import os, sys
+import torch
+from torch import nn
+from torch.nn import functional as F
+from torch.utils.data import DataLoader, SubsetRandomSampler
+
+import torchvision
+import torchvision.transforms as transforms
+import torchvision.datasets as datasets
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Set the device
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(device)
+# **Data Loader**
+
+You can load the CIFAR-10 dataset using the library `torchvision.datasets`
+
+The details of CIFAR-10 dataset can be found in https://www.cs.toronto.edu/~kriz/cifar.html
+
+`transforms_cifar10` is used to assemble several transforms for data preprossing.
+
+# Define data transformations
+transforms_training = transforms.Compose([
+    transforms.Resize((32, 32)),
+    #randomcrop
+    transforms.RandomCrop(32, padding=4, padding_mode='reflect'),
+    transforms.RandomHorizontalFlip(0.3),
+    transforms.RandomVerticalFlip(0.2),
+    transforms.ColorJitter(brightness=0.5, contrast=0.3, saturation=0.2, hue=0.3),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+transforms_val_test = transforms.Compose([
+    transforms.Resize((32, 32)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+# Load CIFAR10 dataset
+trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transforms_training)
+testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transforms_val_test)
+
+# Define validation set size
+val_size = 0.1
+
+# Split dataset into training set and validation set
+num_train = len(trainset)
+indices = list(range(num_train))
+split = int(np.floor(val_size * num_train))
+np.random.shuffle(indices)
+train_idx, val_idx = indices[split:], indices[:split]
+
+# Define samplers for obtaining training and validation batches
+train_sampler = SubsetRandomSampler(train_idx)
+val_sampler = SubsetRandomSampler(val_idx)
+
+# Define data loaders for training, validation, and test sets
+trainloader = DataLoader(trainset, batch_size=80, sampler=train_sampler)
+valloader = DataLoader(trainset, batch_size=80, sampler=val_sampler)  # Note: using trainset with val_sampler
+testloader = DataLoader(testset, batch_size=80, shuffle=False, num_workers=2)
+
+# Classes of CIFAR-10 dataset
+classes = ("plane", "car", "bird", "cat", "deer", "dog", "frog", "horse", "ship", "truck")
+
+print(f"Total training samples: {len(train_idx)}")
+print(f"Total validation samples: {len(val_idx)}")
+print(f"Total test samples: {len(testset)}")
+
+# Examples of dataset
+
+def imshow(img):
+  img = img /2 + 0.5
+  npimg = img.numpy()
+  plt.imshow(np.transpose(npimg, (1, 2, 0)))
+
+dataiter = iter(trainloader)
+imgs, labels = next(dataiter)
+
+imshow(torchvision.utils.make_grid(imgs))
+print(' '.join('%5s' % classes[labels[j]] for j in range(40)))
+# **Your own CNN**
+
+You can implement your own network using libraries such as `torch.nn`and `torch.nn.functional`.
+
+`SimpleNet` and `VGG11` are examples to help your understand the implementation of the network.
+
+So, you can modify the given codes or create another awesome neural network for CIFAR-10 classification.
+#앙상블
+# ResNet9
+
+# Define a convolutional block with optional pooling and dropout
+def conv_block(in_channels, out_channels, pool=False, dropout_prob=0.0):
+    layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+              nn.BatchNorm2d(out_channels),
+              nn.ReLU(inplace=True)]
+    if pool:
+        layers.append(nn.MaxPool2d(2))
+    if dropout_prob > 0.0:
+        layers.append(nn.Dropout2d(dropout_prob))
+
+    return nn.Sequential(*layers)
+
+
+class ResNet9(nn.Module):
+    def __init__(self, in_channels, num_classes):
+        super(ResNet9, self).__init__()
+
+        self.conv1 = conv_block(in_channels, 64, dropout_prob=0)
+        self.conv2 = conv_block(64, 128, pool=True, dropout_prob=0)
+        self.res1 = nn.Sequential(conv_block(128, 128, dropout_prob=0), conv_block(128, 128, dropout_prob=0))
+
+        self.conv3 = conv_block(128, 256, pool=True, dropout_prob=0)
+        self.conv4 = conv_block(256, 512, pool=True, dropout_prob=0)
+        self.res2 = nn.Sequential(conv_block(512, 512, dropout_prob=0), conv_block(512, 512, dropout_prob=0))
+
+        self.classifier = nn.Sequential(nn.MaxPool2d(4),
+                                        nn.Flatten(),
+                                        nn.Dropout(p=0.1),
+                                        nn.Linear(512, num_classes))
+
+    def forward(self, xb):
+        out = self.conv1(xb)
+        out = self.conv2(out)
+        out = self.res1(out) + out
+        out = self.conv3(out)
+        out = self.conv4(out)
+        out = self.res2(out) + out
+        out = self.classifier(out)
+        return out
+
+# VGG16 model (for Deeper layer)
+
+cfg = {'VGG16': [128, 128, 'M', 128, 128, 'M', 256, 256, 256, 'M', 512, 512, 512, 'M', 512, 512, 512, 'M']}
+
+class VGG16(nn.Module):
+    def __init__(self):
+        super(VGG16, self).__init__()
+        self.features = self.make_layers(cfg['VGG16'])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 1 * 1, 512),  # Adjusted for CIFAR-10 input size
+            nn.ReLU(True),
+            nn.Linear(512, 256),
+            nn.ReLU(True),
+            nn.Dropout(p=0.5),
+            nn.Linear(256, 10)
+        )
+
+    def make_layers(self, cfg):
+        layers = []
+        in_channels = 3
+        for x in cfg:
+            if x == 'M':
+                layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+            else:
+                layers += [nn.Conv2d(in_channels, x, kernel_size=3, padding=1),
+                           nn.BatchNorm2d(x),
+                           nn.ReLU(inplace=True),
+                          ]
+                in_channels = x
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.features(x)
+        out = self.avgpool(out)
+        out = out.view(out.size(0), -1)
+        out = self.classifier(out)
+        return out
+
+# Define ensemble function
+def ensemble_predict(models, inputs):
+    outputs = [model(inputs) for model in models]
+    avg_output = torch.mean(torch.stack(outputs), dim=0)
+    return avg_output
+
+# Instantiate models
+vgg16_model = VGG16().to(device)
+resnet9_model = ResNet9(3, 10).to(device)
+
+# Loss function and optimizers
+criterion = nn.CrossEntropyLoss()
+vgg16_optimizer = torch.optim.SGD(vgg16_model.parameters(), lr=0.01, momentum=0.9, weight_decay=1e-6, nesterov=True)
+vgg16_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(vgg16_optimizer, T_max=50, eta_min=0)
+resnet9_optimizer = torch.optim.SGD(resnet9_model.parameters(), lr=0.01, momentum=0.9, weight_decay=1e-4, nesterov=True)
+resnet9_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(resnet9_optimizer, T_max=50, eta_min=0)
+
+# **Loss function and optimizer**
+
+Set the **loss function and optimizer** for training CNN.
+You can modify the loss function or optimizer for better performance.
+# **Train the network**
+
+Train your own network using the above loss function and optimizer.
+#앙상블버전
+import time
+
+# Train the models
+epochs = 50  # number of epochs
+running_loss_history = []
+validation_running_loss_history = []
+
+start_time = time.time()
+for epoch in range(epochs):
+    loss_tmp = 0.0
+    epoch_loss = 0.0
+
+    vgg16_model.train()  # Ensure the model is in training mode
+    resnet9_model.train()  # Ensure the model is in training mode
+
+    for i, data in enumerate(trainloader, start=0):
+        # Load the data
+        inputs, labels = data
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+
+        # VGG16 model
+        vgg16_optimizer.zero_grad()
+        vgg16_outputs = vgg16_model(inputs)
+        vgg16_loss = criterion(vgg16_outputs, labels)
+        vgg16_loss.backward()
+        vgg16_optimizer.step()
+
+        # ResNet9 model
+        resnet9_optimizer.zero_grad()
+        resnet9_outputs = resnet9_model(inputs)
+        resnet9_loss = criterion(resnet9_outputs, labels)
+        resnet9_loss.backward()
+        resnet9_optimizer.step()
+
+        loss_tmp += vgg16_loss.item() + resnet9_loss.item()
+        epoch_loss += vgg16_loss.item() + resnet9_loss.item()
+
+        if i % 500 == 499:  # Print loss every 500 mini-batches
+            print('[Epoch - %d, Iteration - %5d] Loss: %.3f' %
+                  (epoch + 1, i + 1, loss_tmp / 500))
+            loss_tmp = 0.0
+
+    # Calculate validation loss (doesn't need to be trained)
+    vgg16_model.eval()  # Ensure the model is in evaluation mode
+    resnet9_model.eval()  # Ensure the model is in evaluation mode
+    epoch_val_loss = 0.0
+    with torch.no_grad():
+        for val_data in valloader:
+            val_inputs, val_labels = val_data
+            val_inputs = val_inputs.to(device)
+            val_labels = val_labels.to(device)
+
+            # Ensemble prediction
+            val_outputs = ensemble_predict([vgg16_model, resnet9_model], val_inputs)
+            val_loss = criterion(val_outputs, val_labels)
+            epoch_val_loss += val_loss.item()
+
+    epoch_loss = epoch_loss / len(trainloader)
+    epoch_val_loss = epoch_val_loss / len(valloader)
+
+    # Update the learning rate according to the learning rate scheduler
+    vgg16_scheduler.step()
+    resnet9_scheduler.step()
+
+    # Print the epoch loss
+    print('[Epoch - %d] Training Loss: %.3f Validation Loss: %.3f' %
+          (epoch + 1, round(epoch_loss, 3), round(epoch_val_loss, 3)))
+    running_loss_history.append(round(epoch_loss, 3))
+    validation_running_loss_history.append(round(epoch_val_loss, 3))
+print('Finished Training')
+
+# Track end time
+end_time = time.time()
+
+# Calculate total training time
+total_training_time = end_time - start_time
+
+print(f'Total Training Time: {total_training_time:.2f} seconds')
+
+학습률 시각화
+# Assuming running_loss_history and validation_running_loss_history are lists of tensors
+
+print(running_loss_history)
+print(validation_running_loss_history)
+
+# Plotting the values
+plt.plot(running_loss_history, label='Training Loss')
+plt.plot(validation_running_loss_history, label='Validation Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('Training and Validation Loss')
+plt.legend()
+plt.show()
+
+# **Test the network**
+
+Test the trained network using the testset.
+
+Accuracy of the network on the 10,000 test images is the final accuracy of your network.
+
+The closer the accuray is to 100%, the better the network classifies the input image.
+#앙상블용 test
+# Test the trained models with sample
+dataiter_test = iter(testloader)
+img_test, labels_test = next(dataiter_test)
+
+imshow(torchvision.utils.make_grid(img_test))
+print('GroundTruth: ', ' '.join('%5s' % classes[labels_test[j]] for j in range(40)))
+
+img_test = img_test.to(device)
+labels_test = labels_test.to(device)
+
+# Prediction(이부분이 변경됨)
+vgg16_model.eval()
+resnet9_model.eval()
+outputs_test = ensemble_predict([vgg16_model, resnet9_model], img_test)
+_, predicted = torch.max(outputs_test.data, 1)
+print('Predicted: ', ' '.join('%5s' % classes[predicted[j]] for j in range(40)))
+#앙상블용
+# Test the trained models with overall test dataset
+
+correct = 0
+total = 0
+
+vgg16_model.eval()
+resnet9_model.eval()
+for data in testloader:
+    # Load the data
+    inputs_test, labels_test = data
+    inputs_test = inputs_test.to(device)
+    labels_test = labels_test.to(device)
+
+    # Ensemble prediction(아랫줄만 변경)
+    outputs_test = ensemble_predict([vgg16_model, resnet9_model], inputs_test)
+    _, predicted = torch.max(outputs_test.data, 1)
+
+    # Calculate the accuracy
+    total += labels_test.size(0)
+    correct += (predicted == labels_test).sum()
+
+# Final accuracy
+print('Accuracy of the network on the 10,000 test images: %d %%' % (100 * correct / total))
